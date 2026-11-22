@@ -4,17 +4,18 @@ A procedural Blender 3D (`bpy` / `bmesh`) generator that builds a detailed **sta
 
 ## Features
 
-The script builds and organizes all geometry into five Outliner collections:
+The script builds and organizes all geometry into six Outliner collections:
 
-* **`01_Pedestal_Base`** — Chamfered concrete plinth, steel baseplate with 16 anchor bolts, gusseted pedestal drum, slewing ring bearing with 28 flange bolts, rotating turret cheeks, and rear hydraulic manifold block.
-* **`02_Boom_Assembly`** — Curved welded box-girder main boom with overhanging top/bottom flange plates, twin side-mounted lift cylinders, top-mounted dipper cylinder, dog-leg dipper head, tapered dipper arm, curl cylinder, and 4-bar linkage.
-* **`03_Hydraulic_Breaker`** — Box-silenced hydraulic hammer housing with twin mounting clevis cheeks, bolted top adapter plate, recessed side service slots, tool bushing, retainer pin, and forged moil point chisel.
-* **`04_Hydraulic_Hoses`** — Smooth 3D NURBS hydraulic lines looping from the turret valve block, clamped along the boom spine, arching over the elbow, and hanging into the breaker ports.
-* **`05_Mine_Tip_Grizzly`** — Concrete tipping deck framing a recessed ore-pass shaft, 9 heavy I-beam grizzly bars, LHD wheel-stop curb, safety bollards, and angular oversize ore boulders.
+* **`01_Pedestal_Base`** — Chamfered concrete plinth, steel baseplate with 16 anchor bolts, gusseted pedestal drum, slewing ring bearing with 28 flange bolts, rotating turret cheeks, planetary slew drive, and rear hydraulic manifold block.
+* **`02_Boom_Assembly`** — Smooth 13-station curved welded box-girder main boom with overhanging top/bottom flange plates, twin side-mounted lift cylinders, top-mounted dipper cylinder, dog-leg dipper head, tapered dipper arm, curl cylinder, and a live 2-bone IK 4-bar linkage.
+* **`03_Hydraulic_Breaker`** — Box-silenced hydraulic hammer housing with twin mounting clevis cheeks, bolted top adapter plate, framed recessed side service slots, tool bushing, retainer pin, and forged moil point chisel seated on the target boulder.
+* **`04_Hydraulic_Hoses`** — Continuous hydraulic routing from turret valve fittings through `HOOK`-constrained flexible manifold hoses, clamped steel boom hardlines, elbow jumper hoses, dipper hardlines, and flexible breaker feed hoses that stay locked to their fittings while posing.
+* **`05_Mine_Tip_Grizzly`** — Seamless concrete tipping deck with recessed ore-pass shaft, 9 heavy I-beam grizzly bars, LHD wheel-stop curb, flanged hazard bollards with safety chains, and fractured oversize ore boulders seated cleanly atop the bars.
+* **`06_Underground_Mine_Bay`** — Open-front cutaway shotcrete rock cavern arch, rear rock bulkhead, receding LHD haulage drift tunnel, steel ground-support ribs, staggered rock bolts, suspended yellow ventilation duct, mine air/water service pipes, overhead high-bay LED floodlights, and a skid-mounted Hydraulic Power Unit (HPU) with electrical control cabinet.
 
 ## Requirements
 
-* **Blender 3.6+** or **Blender 4.x** (no external add-ons required).
+* **Blender 3.6+**, **Blender 4.x**, or **Blender 5.x** (no external add-ons required).
 
 ## Quick Start
 
@@ -34,7 +35,7 @@ blender --background --python rock_breaker_generator.py --python-expr "import bp
 
 ## Posing the Rig
 
-All major joints are parented hierarchically, and hydraulic cylinders use `DAMPED_TRACK` constraints so rods telescope inside their barrels automatically:
+All major joints are parented hierarchically, hydraulic cylinders use `DAMPED_TRACK` constraints so rods telescope inside their barrels automatically, the 4-bar breaker curl linkage is driven by a native 2-bone IK solver (`Linkage_4Bar_IK_Rig`), and flexible hoses use `HOOK` modifiers across every moving joint:
 
 | Pivot Empty | Axis | Action |
 | :--- | :---: | :--- |
@@ -43,7 +44,7 @@ All major joints are parented hierarchically, and hydraulic cylinders use `DAMPE
 | `Dipper_Pivot` | `Y` | Extend or retract the dipper arm |
 | `Breaker_Pivot` | `Y` | Angle the hydraulic hammer |
 
-To isolate just the stationary rock breaker without the tipping bay, hide the `05_Mine_Tip_Grizzly` collection in the Outliner.
+To isolate just the stationary rock breaker without the tipping bay or tunnel cavern, hide the `05_Mine_Tip_Grizzly` and/or `06_Underground_Mine_Bay` collections in the Outliner.
 
 ## Project Structure
 
