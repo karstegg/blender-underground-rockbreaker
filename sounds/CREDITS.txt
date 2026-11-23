@@ -1,0 +1,21 @@
+Real-World Audio Samples Used in sounds/
+========================================
+
+1. Underground Mine Machinery & Rock Hammering (Wikimedia Commons — Work With Sounds, Trbovlje Hrastnik Mine)
+   - mine_ambient_hpu.wav     <- File:WWS_Submersiblepump.ogg (CC BY 4.0)
+   - hydraulic_boom_move.wav  <- File:WWS_Pneumatictractionunit.ogg (CC BY 4.0)
+   - hammer_burst_1.wav       <- File:WWS_Pneumaticpickhammer.ogg (CC BY 4.0)
+   - hammer_burst_2.wav       <- File:WWS_Pneumaticpickhammer.ogg (CC BY 4.0)
+   Source: https://commons.wikimedia.org/wiki/Category:Trbovlje_Hrastnik_Mine
+
+2. Rock Shattering, Impacts & Steel Grizzly Clatter (OpenGameArt — 75 CC0 Breaking, Falling, Hit SFX)
+   - hammer_strike.wav        <- bfh1_rock_hit_01.ogg (CC0 Public Domain)
+   - rock_shatter_1.wav       <- bfh1_rock_breaking_01.ogg (CC0 Public Domain)
+   - rock_shatter_2.wav       <- bfh1_rock_breaking_03.ogg (CC0 Public Domain)
+   - grizzly_clatter_echo.wav <- bfh1_metal_falling_02.ogg (CC0 Public Domain)
+   - grizzly_clatter_2.wav    <- bfh1_metal_falling_04.ogg (CC0 Public Domain)
+   Source: https://opengameart.org/content/75-cc0-breaking-falling-hit-sfx
+
+3. Falling Stones Cascade (BigSoundBank — Sound #1022 Fall of Stone)
+   - rock_shatter_crumble.wav <- 1022.ogg (CC0 Public Domain)
+   Source: https://bigsoundbank.com/sound-1022-fall-of-stone.html

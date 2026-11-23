@@ -1,7 +1,10 @@
 import bpy
 import bmesh
 import math
+import os
 import random
+import struct
+import wave
 from mathutils import Vector, Matrix, Euler
 
 # ==============================================================================
@@ -15,6 +18,15 @@ for obj in list(bpy.data.objects):
 
 for col in list(bpy.data.collections):
     bpy.data.collections.remove(col)
+
+if bpy.context.scene.rigidbody_world:
+    bpy.ops.rigidbody.world_remove()
+
+if bpy.context.scene.sequence_editor:
+    bpy.context.scene.sequence_editor_clear()
+
+for snd in list(bpy.data.sounds):
+    bpy.data.sounds.remove(snd, do_unlink=True)
 
 for block_group in (
     bpy.data.meshes,
@@ -39,6 +51,7 @@ col_breaker = make_collection("03_Hydraulic_Breaker")
 col_hoses   = make_collection("04_Hydraulic_Hoses")
 col_mine    = make_collection("05_Mine_Tip_Grizzly")
 col_bay     = make_collection("06_Underground_Mine_Bay")
+col_fx      = make_collection("07_Rock_Breaking_FX")
 
 # ==============================================================================
 # 2. PROCEDURAL INDUSTRIAL MATERIALS (Blender 3.6 / 4.x / 5.x Compatible)
@@ -193,6 +206,64 @@ def create_emissive_mat(name, color, strength=8.0):
 mat_lamp_glow = create_emissive_mat("Mine_Lamp_Emissive", (1.0, 0.94, 0.80), strength=14.0)
 mat_led_green = create_emissive_mat("Indicator_Green",    (0.08, 0.95, 0.22), strength=6.0)
 mat_led_red   = create_emissive_mat("Indicator_Red",      (0.95, 0.10, 0.08), strength=6.0)
+mat_spark     = create_emissive_mat("Impact_Spark",       (1.0, 0.72, 0.22), strength=22.0)
+
+def create_dust_mat(name):
+    """Soft volumetric-style rock-dust puff shader with radial edge falloff + animated opacity."""
+    mat = bpy.data.materials.new(name=name)
+    if bpy.app.version < (5, 0, 0):
+        mat.use_nodes = True
+    if hasattr(mat, "surface_render_method"):
+        mat.surface_render_method = 'BLENDED'
+    elif hasattr(mat, "blend_method"):
+        mat.blend_method = 'BLEND'
+    nt = mat.node_tree
+    nodes = nt.nodes
+    links = nt.links
+    bsdf = nodes.get("Principled BSDF")
+    bsdf.inputs["Base Color"].default_value = (0.42, 0.40, 0.37, 1.0)
+    bsdf.inputs["Roughness"].default_value = 0.96
+
+    # Soft wispy edges via Layer Weight (Facing) * Noise * animated Opacity value
+    lw = nodes.new("ShaderNodeLayerWeight")
+    lw.inputs["Blend"].default_value = 0.35
+    inv = nodes.new("ShaderNodeMath")
+    inv.operation = 'SUBTRACT'
+    inv.inputs[0].default_value = 1.0
+    links.new(lw.outputs["Facing"], inv.inputs[1])
+
+    pw = nodes.new("ShaderNodeMath")
+    pw.operation = 'POWER'
+    pw.inputs[1].default_value = 2.2
+    links.new(inv.outputs["Value"], pw.inputs[0])
+
+    tc = nodes.new("ShaderNodeTexCoord")
+    ns = nodes.new("ShaderNodeTexNoise")
+    ns.inputs["Scale"].default_value = 4.5
+    ns.inputs["Detail"].default_value = 5.0
+    links.new(tc.outputs["Object"], ns.inputs["Vector"])
+
+    mul_n = nodes.new("ShaderNodeMath")
+    mul_n.operation = 'MULTIPLY'
+    links.new(pw.outputs["Value"], mul_n.inputs[0])
+    links.new(ns.outputs["Fac"], mul_n.inputs[1])
+
+    op_val = nodes.new("ShaderNodeValue")
+    op_val.name = "Dust_Opacity"
+    op_val.outputs[0].default_value = 0.0
+
+    mul_a = nodes.new("ShaderNodeMath")
+    mul_a.operation = 'MULTIPLY'
+    links.new(mul_n.outputs["Value"], mul_a.inputs[0])
+    links.new(op_val.outputs["Value"], mul_a.inputs[1])
+    links.new(mul_a.outputs["Value"], bsdf.inputs["Alpha"])
+    return mat, op_val
+
+mat_ore_fresh = create_mat(
+    "Ore_Fresh_Fracture", (0.20, 0.185, 0.172),
+    metallic=0.14, roughness=0.78,
+    noise_scale=9.0, rough_var=0.08, bump_strength=0.38, color_var=0.22,
+)
 
 # ==============================================================================
 # 3. GEOMETRY, SHADING & RIGGING HELPERS
@@ -777,6 +848,7 @@ for bx in (7.12, 7.32, 7.52, 7.72):
 make_box("Breaker_Main_Body",   (HX, 0.0, 2.04 + Z_SHIFT), (0.54, 0.46, 1.78), col_breaker, mat=mat_red, parent=breaker_pivot, bevel=0.025)
 make_box("Breaker_Upper_Collar",(HX, 0.0, 2.81 + Z_SHIFT), (0.59, 0.50, 0.22), col_breaker, mat=mat_red, parent=breaker_pivot, bevel=0.012)
 make_box("Breaker_Lower_Skirt", (HX, 0.0, 1.24 + Z_SHIFT), (0.60, 0.52, 0.24), col_breaker, mat=mat_red, parent=breaker_pivot, bevel=0.015)
+obj_breaker_skirt = bpy.data.objects["Breaker_Lower_Skirt"]
 
 # Flush-framed recessed service slots (thin machined bezel + inset dark rubber plug)
 for side_sign, side_y in [(-1, -0.23), (1, 0.23)]:
@@ -791,7 +863,7 @@ Z_BREAKER_PORT = 2.18 + Z_SHIFT
 for py in (-0.11, 0.11):
     make_cyl(f"Breaker_HydPort_{py:.2f}", (HX - 0.30, py, Z_BREAKER_PORT), 0.036, 0.11, col_breaker, rot=(0, math.radians(90), 0), verts=6, mat=mat_machined, parent=breaker_pivot)
 
-make_cyl("Breaker_Tool_Chuck", (HX, 0.0, 1.01 + Z_SHIFT), 0.145, 0.26, col_breaker, verts=28, mat=mat_dark, parent=breaker_pivot, bevel=0.008)
+obj_breaker_chuck = make_cyl("Breaker_Tool_Chuck", (HX, 0.0, 1.01 + Z_SHIFT), 0.145, 0.26, col_breaker, verts=28, mat=mat_dark, parent=breaker_pivot, bevel=0.008)
 make_cyl("Tool_Retainer_Pin",  (HX, 0.0, 1.05 + Z_SHIFT), 0.032, 0.34, col_breaker, rot=(math.radians(90), 0, 0), mat=mat_machined, parent=breaker_pivot)
 
 # Forged moil point chisel with crisp auto-smoothing (tip at z = 0.50 m)
@@ -949,37 +1021,47 @@ def make_deck_with_opening(name, x_min, x_max, y_min, y_max, ox_min, ox_max, oy_
     obj = bpy.data.objects.new(name, mesh)
     return link_obj(obj, col, mat=mat, parent=parent, bevel=0.025)
 
-make_deck_with_opening(
+obj_tip_deck = make_deck_with_opening(
     "Tip_Deck_Concrete_Slab",
     x_min=-1.50, x_max=12.00, y_min=-3.80, y_max=3.80,
-    ox_min=5.00, ox_max=9.00, oy_min=-2.00, oy_max=2.00,
+    ox_min=4.95, ox_max=9.05, oy_min=-2.05, oy_max=2.05,
     z_bot=-0.50, z_top=0.00,
     col=col_mine, mat=mat_concrete, parent=mine_root,
 )
 
-make_box("OrePass_Wall_Left",  (7.00,  2.08, -1.90), (4.20, 0.16, 3.40), col_mine, mat=mat_concrete, parent=mine_root, bevel=0.0)
-make_box("OrePass_Wall_Right", (7.00, -2.08, -1.90), (4.20, 0.16, 3.40), col_mine, mat=mat_concrete, parent=mine_root, bevel=0.0)
-make_box("OrePass_Wall_Near",  (4.92,  0.00, -1.90), (0.16, 4.20, 3.40), col_mine, mat=mat_concrete, parent=mine_root, bevel=0.0)
-make_box("OrePass_Wall_Far",   (9.08,  0.00, -1.90), (0.16, 4.20, 3.40), col_mine, mat=mat_concrete, parent=mine_root, bevel=0.0)
-make_box("OrePass_Dark_Bottom",(7.00,  0.00, -3.40), (4.20, 4.20, 0.20), col_mine, mat=mat_void,     parent=mine_root, bevel=0.0)
+passive_box_colliders = []
+passive_box_colliders.append(make_box("OrePass_Wall_Left",  (7.00,  2.13, -1.90), (4.40, 0.16, 3.40), col_mine, mat=mat_concrete, parent=mine_root, bevel=0.0))
+passive_box_colliders.append(make_box("OrePass_Wall_Right", (7.00, -2.13, -1.90), (4.40, 0.16, 3.40), col_mine, mat=mat_concrete, parent=mine_root, bevel=0.0))
+passive_box_colliders.append(make_box("OrePass_Wall_Near",  (4.87,  0.00, -1.90), (0.16, 4.40, 3.40), col_mine, mat=mat_concrete, parent=mine_root, bevel=0.0))
+passive_box_colliders.append(make_box("OrePass_Wall_Far",   (9.13,  0.00, -1.90), (0.16, 4.40, 3.40), col_mine, mat=mat_concrete, parent=mine_root, bevel=0.0))
+passive_box_colliders.append(make_box("OrePass_Dark_Bottom",(7.00,  0.00, -3.80), (4.60, 4.60, 1.00), col_mine, mat=mat_void,     parent=mine_root, bevel=0.0))
 
-make_box("Grizzly_Frame_Near",  (4.96,  0.00, 0.02), (0.16, 4.24, 0.14), col_mine, mat=mat_dark, parent=mine_root, bevel=0.01)
-make_box("Grizzly_Frame_Far",   (9.04,  0.00, 0.02), (0.16, 4.24, 0.14), col_mine, mat=mat_dark, parent=mine_root, bevel=0.01)
-make_box("Grizzly_Frame_Left",  (7.00,  2.04, 0.02), (4.00, 0.16, 0.14), col_mine, mat=mat_dark, parent=mine_root, bevel=0.01)
-make_box("Grizzly_Frame_Right", (7.00, -2.04, 0.02), (4.00, 0.16, 0.14), col_mine, mat=mat_dark, parent=mine_root, bevel=0.01)
+# Heavy steel grizzly frame enclosing 4.10 m x 4.10 m clear inner span:
+# 5 internal longitudinal bars + 5 internal cross-bars (100 mm top flange, 700 mm pitch)
+# -> 6 x 6 = 36 exact 600 mm x 600 mm clear square apertures!
+passive_box_colliders.append(make_box("Grizzly_Frame_Near",  (4.85,  0.00, 0.02), (0.20, 4.50, 0.14), col_mine, mat=mat_dark, parent=mine_root, bevel=0.01))
+passive_box_colliders.append(make_box("Grizzly_Frame_Far",   (9.15,  0.00, 0.02), (0.20, 4.50, 0.14), col_mine, mat=mat_dark, parent=mine_root, bevel=0.01))
+passive_box_colliders.append(make_box("Grizzly_Frame_Left",  (7.00,  2.15, 0.02), (4.30, 0.20, 0.14), col_mine, mat=mat_dark, parent=mine_root, bevel=0.01))
+passive_box_colliders.append(make_box("Grizzly_Frame_Right", (7.00, -2.15, 0.02), (4.30, 0.20, 0.14), col_mine, mat=mat_dark, parent=mine_root, bevel=0.01))
 
-for i in range(9):
-    gy = -1.80 + i * 0.45
-    make_box(f"Grizzly_Bar_Web_{i+1}", (7.00, gy, -0.06), (4.00, 0.08, 0.22), col_mine, mat=mat_dark, parent=mine_root, bevel=0.006)
-    make_box(f"Grizzly_Bar_Top_{i+1}", (7.00, gy,  0.06), (4.00, 0.13, 0.05), col_mine, mat=mat_machined, parent=mine_root, bevel=0.008)
+GRIZZLY_PITCH   = 0.70   # 600 mm aperture + 100 mm bar width
+GRIZZLY_BAR_W   = 0.10   # 100 mm top wear cap
+GRIZZLY_WEB_W   = 0.06   # 60 mm I-beam web
+GRIZZLY_BAR_YS  = [-1.40 + i * GRIZZLY_PITCH for i in range(5)]  # 5 longitudinal bars along X
+GRIZZLY_BAR_XS  = [ 5.60 + i * GRIZZLY_PITCH for i in range(5)]  # 5 transverse cross-bars along Y
 
-for gx in (6.15, 7.85):
-    make_box(f"Grizzly_CrossTie_{gx:.2f}", (gx, 0.0, -0.14), (0.14, 4.00, 0.14), col_mine, mat=mat_dark, parent=mine_root, bevel=0.008)
+for i, gy in enumerate(GRIZZLY_BAR_YS):
+    passive_box_colliders.append(make_box(f"Grizzly_LongWeb_{i+1}", (7.00, gy, -0.06), (4.10, GRIZZLY_WEB_W, 0.22), col_mine, mat=mat_dark, parent=mine_root, bevel=0.005))
+    passive_box_colliders.append(make_box(f"Grizzly_LongTop_{i+1}", (7.00, gy,  0.06), (4.10, GRIZZLY_BAR_W, 0.05), col_mine, mat=mat_machined, parent=mine_root, bevel=0.006))
 
-make_box("LHD_Wheel_Stop_Curb", (9.45, 0.0, 0.20), (0.45, 4.40, 0.40), col_mine, mat=mat_yellow, parent=mine_root, bevel=0.04)
+for i, gx in enumerate(GRIZZLY_BAR_XS):
+    passive_box_colliders.append(make_box(f"Grizzly_CrossWeb_{i+1}", (gx, 0.00, -0.06), (GRIZZLY_WEB_W, 4.10, 0.22), col_mine, mat=mat_dark, parent=mine_root, bevel=0.005))
+    passive_box_colliders.append(make_box(f"Grizzly_CrossTop_{i+1}", (gx, 0.00,  0.06), (GRIZZLY_BAR_W, 4.10, 0.05), col_mine, mat=mat_machined, parent=mine_root, bevel=0.006))
+
+passive_box_colliders.append(make_box("LHD_Wheel_Stop_Curb", (9.55, 0.0, 0.20), (0.45, 4.60, 0.40), col_mine, mat=mat_yellow, parent=mine_root, bevel=0.04))
 
 # Detailed safety bollards (base flange + hazard collar + dome cap) + safety chains
-bollard_coords = [(3.8, -2.2), (3.8, 2.2), (4.8, -2.35), (4.8, 2.35), (9.2, -2.35), (9.2, 2.35)]
+bollard_coords = [(3.8, -2.35), (3.8, 2.35), (4.68, -2.48), (4.68, 2.48), (9.32, -2.48), (9.32, 2.48)]
 for bx, by in bollard_coords:
     make_box(f"Bollard_Base_{bx}_{by}", (bx, by, 0.015), (0.28, 0.28, 0.03), col_mine, mat=mat_dark, parent=mine_root, bevel=0.005)
     make_cyl(f"Safety_Bollard_{bx}_{by}", (bx, by, 0.52), 0.082, 1.00, col_mine, verts=20, mat=mat_yellow, parent=mine_root, bevel=0.008)
@@ -987,10 +1069,10 @@ for bx, by in bollard_coords:
     make_cyl(f"Bollard_Cap_{bx}_{by}",  (bx, by, 1.03), 0.086, 0.04, col_mine, verts=20, mat=mat_dark, parent=mine_root, bevel=0.012)
 
 for chain_idx, (p1, p2) in enumerate([
-    ((3.8, -2.2), (4.8, -2.35)),
-    ((4.8, -2.35), (9.2, -2.35)),
-    ((3.8,  2.2), (4.8,  2.35)),
-    ((4.8,  2.35), (9.2,  2.35)),
+    ((3.8, -2.35), (4.68, -2.48)),
+    ((4.68, -2.48), (9.32, -2.48)),
+    ((3.8,  2.35), (4.68,  2.48)),
+    ((4.68,  2.48), (9.32,  2.48)),
 ]):
     mid_x = 0.5 * (p1[0] + p2[0])
     mid_y = 0.5 * (p1[1] + p2[1])
@@ -1005,7 +1087,7 @@ for chain_idx, (p1, p2) in enumerate([
     make_hose(f"Safety_Chain_{chain_idx+1}", chain_pts, 0.012, col_mine, mat=mat_yellow, parent=mine_root)
 
 # Fractured oversize ore boulders seated cleanly ON TOP of the grizzly bars (zero bar clipping!)
-def make_ore_boulder(name, xy_loc, scale, seed, z_floor=Z_GRIZZLY_TOP, seat_depth=0.012, target_top_z=None):
+def build_boulder_bmesh(scale, seed, z_floor=Z_GRIZZLY_TOP, seat_depth=0.012, target_top_z=None):
     rng = random.Random(seed)
     bm = bmesh.new()
     bmesh.ops.create_icosphere(bm, subdivisions=3, radius=1.0)
@@ -1024,7 +1106,6 @@ def make_ore_boulder(name, xy_loc, scale, seed, z_floor=Z_GRIZZLY_TOP, seat_dept
             proj = p.dot(d)
             if proj > cut:
                 p -= d * (proj - cut) * strength
-        # Fine angular crag variation
         jitter = 1.0 + 0.08 * math.sin(p.x * 7.3 + seed) * math.cos(p.y * 6.1 - seed) + rng.uniform(-0.04, 0.04)
         p *= jitter
         p = rot_m @ p
@@ -1041,35 +1122,158 @@ def make_ore_boulder(name, xy_loc, scale, seed, z_floor=Z_GRIZZLY_TOP, seat_dept
     min_z = min(v.co.z for v in bm.verts)
     max_z = max(v.co.z for v in bm.verts)
 
-    # Optionally scale Z so boulder top meets chisel tip exactly
     if target_top_z is not None:
         desired_h = max(0.22, target_top_z - (z_floor - seat_depth))
         cur_h = max(0.01, max_z - min_z)
         z_mul = desired_h / cur_h
         for v in bm.verts:
             v.co.z = (v.co.z - min_z) * z_mul
-        min_z = 0.0
     else:
         for v in bm.verts:
             v.co.z -= min_z
-        min_z = 0.0
 
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
-    # Keep fractured ore flat-shaded for crisp rock cleavage facets
     for f in bm.faces:
         f.smooth = False
+    return bm
 
+def make_ore_boulder(name, xy_loc, scale, seed, z_floor=Z_GRIZZLY_TOP, seat_depth=0.0, target_top_z=None):
+    bm = build_boulder_bmesh(scale, seed, z_floor=z_floor, seat_depth=seat_depth, target_top_z=target_top_z)
+    # Recenter mesh at its true 3D centroid so Bullet Rigid Body center-of-mass is physically accurate
+    centroid = sum((v.co for v in bm.verts), Vector((0.0, 0.0, 0.0))) / len(bm.verts)
+    for v in bm.verts:
+        v.co -= centroid
+    min_z_local = min(v.co.z for v in bm.verts)
     mesh = bpy.data.meshes.new(name)
     bm.to_mesh(mesh)
     bm.free()
     obj = bpy.data.objects.new(name, mesh)
-    obj.location = Vector((xy_loc[0], xy_loc[1], z_floor - seat_depth))
+    # Place bottom surface just cleanly above the grizzly bar top (+0.004 m) with zero initial interpenetration
+    obj.location = Vector((xy_loc[0] + centroid.x, xy_loc[1] + centroid.y, z_floor + 0.004 - min_z_local))
     return link_obj(obj, col_mine, mat=mat_ore, parent=mine_root)
 
-make_ore_boulder("Oversize_Boulder_Target", (HX, 0.02),    (0.50, 0.46, 0.34), seed=42,  target_top_z=Z_CHISEL_TIP + 0.015)
-make_ore_boulder("Oversize_Boulder_2",      (6.30, -0.82), (0.42, 0.36, 0.28), seed=17)
-make_ore_boulder("Oversize_Boulder_3",      (7.92,  0.96), (0.45, 0.35, 0.26), seed=89)
-make_ore_boulder("Oversize_Boulder_4",      (6.68,  1.15), (0.35, 0.30, 0.22), seed=103)
+# Set to an integer for deterministic rock fractures, or leave None for fresh random fractures every run
+FRACTURE_SEED = None
+
+def make_fractured_boulder(
+    name,
+    xy_loc,
+    scale,
+    shape_seed,
+    fracture_seed=None,
+    min_shards=5,
+    max_shards=11,
+    z_floor=Z_GRIZZLY_TOP,
+    seat_depth=0.012,
+    target_top_z=None,
+):
+    """
+    Pre-fractures an oversize ore boulder into a random, non-uniform number of watertight
+    interlocking 3D Voronoi shards clustered around the chisel impact zone so every rock
+    cleaves organically into realistic mixed lump sizes (some <400 mm fines, some larger slabs).
+    Returns (group_empty, shards_info_list, top_world_z).
+    """
+    base_bm = build_boulder_bmesh(scale, shape_seed, z_floor=z_floor, seat_depth=seat_depth, target_top_z=target_top_z)
+    base_z = z_floor - seat_depth
+    top_local_z = max(v.co.z for v in base_bm.verts)
+    top_world_z = base_z + top_local_z
+
+    if fracture_seed is None:
+        rng = random.SystemRandom()
+    else:
+        rng = random.Random(fracture_seed)
+
+    # Random shard count per rock (e.g. 5–11 irregular pieces rather than a fixed radial pie)
+    num_shards = rng.randint(min_shards, max_shards)
+
+    # Non-uniform 3D Voronoi seeding:
+    # - 2–3 seeds clustered near the upper chisel-entry zone (fine spall/wedges right under tip)
+    # - Remaining seeds scattered irregularly in 3D with minimum spacing for organic cleavage blocks
+    cell_centers = []
+    n_impact = min(3, max(2, num_shards // 3))
+    for _ in range(n_impact):
+        ang = rng.uniform(0.0, 2.0 * math.pi)
+        rad = rng.uniform(0.08, 0.34)
+        cx = math.cos(ang) * scale[0] * rad
+        cy = math.sin(ang) * scale[1] * rad
+        cz = top_local_z * rng.uniform(0.55, 0.90)
+        cell_centers.append(Vector((cx, cy, cz)))
+
+    min_sep = min(scale[0], scale[1]) * 0.28
+    attempts = 0
+    while len(cell_centers) < num_shards and attempts < 200:
+        attempts += 1
+        ang = rng.uniform(0.0, 2.0 * math.pi)
+        rad = rng.uniform(0.24, 0.78) ** 0.75
+        cx = math.cos(ang) * scale[0] * rad
+        cy = math.sin(ang) * scale[1] * rad
+        cz = top_local_z * rng.uniform(0.14, 0.84)
+        cand = Vector((cx, cy, cz))
+        if all((cand - existing).length >= min_sep for existing in cell_centers):
+            cell_centers.append(cand)
+
+    group = make_empty(f"{name}_Group", (xy_loc[0], xy_loc[1], base_z), col_mine, parent=mine_root, size=0.12)
+    shards = []
+
+    for i, ci in enumerate(cell_centers):
+        bm = base_bm.copy()
+        for j, cj in enumerate(cell_centers):
+            if i == j or len(bm.verts) == 0:
+                continue
+            mid = (ci + cj) * 0.5
+            nrm = (cj - ci).normalized()
+            geom = list(bm.verts) + list(bm.edges) + list(bm.faces)
+            ret = bmesh.ops.bisect_plane(
+                bm, geom=geom, plane_co=mid, plane_no=nrm,
+                clear_outer=True, clear_inner=False,
+            )
+            cut_edges = [g for g in ret["geom_cut"] if isinstance(g, bmesh.types.BMEdge)]
+            if cut_edges:
+                bmesh.ops.contextual_create(bm, geom=cut_edges)
+        if len(bm.verts) < 4:
+            bm.free()
+            continue
+
+        # Compute centroid in boulder-local space and recenter shard mesh at its own origin for natural tumbling
+        centroid = sum((v.co for v in bm.verts), Vector((0.0, 0.0, 0.0))) / len(bm.verts)
+        for v in bm.verts:
+            v.co -= centroid
+        bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+        for f in bm.faces:
+            f.smooth = False
+
+        radius_est = max(v.co.length for v in bm.verts)
+        mesh = bpy.data.meshes.new(f"{name}_Shard_{i+1}")
+        bm.to_mesh(mesh)
+        bm.free()
+
+        shard_obj = bpy.data.objects.new(f"{name}_Shard_{i+1}", mesh)
+        world_pos = Vector((xy_loc[0] + centroid.x, xy_loc[1] + centroid.y, base_z + centroid.z))
+        shard_obj.location = world_pos
+        link_obj(shard_obj, col_mine, mat=mat_ore if rng.random() < 0.55 else mat_ore_fresh, parent=mine_root)
+        shards.append({
+            "obj": shard_obj,
+            "rest_pos": world_pos.copy(),
+            "radial_dir": Vector((centroid.x, centroid.y, 0.0)).normalized() if Vector((centroid.x, centroid.y)).length > 1e-4 else Vector((rng.uniform(-1, 1), rng.uniform(-1, 1), 0.0)).normalized(),
+            "radius": radius_est,
+        })
+
+    base_bm.free()
+    return group, shards, top_world_z
+
+_fseed1 = None if FRACTURE_SEED is None else FRACTURE_SEED + 101
+_fseed2 = None if FRACTURE_SEED is None else FRACTURE_SEED + 202
+
+boulder1_group, boulder1_shards, BOULDER1_TOP_Z = make_fractured_boulder(
+    "Oversize_Boulder_Target", (HX, 0.02), (0.54, 0.50, 0.36), shape_seed=42, fracture_seed=_fseed1,
+    min_shards=5, max_shards=11, seat_depth=0.002, target_top_z=Z_CHISEL_TIP + 0.015,
+)
+boulder2_group, boulder2_shards, BOULDER2_TOP_Z = make_fractured_boulder(
+    "Oversize_Boulder_2", (6.30, -0.72), (0.50, 0.46, 0.34), shape_seed=17, fracture_seed=_fseed2,
+    min_shards=5, max_shards=11, seat_depth=0.002,
+)
+boulder3_obj = make_ore_boulder("Oversize_Boulder_3", (8.40,  1.05), (0.50, 0.45, 0.32), seed=89)
+boulder4_obj = make_ore_boulder("Oversize_Boulder_4", (6.30,  1.40), (0.48, 0.44, 0.29), seed=103)
 
 # ==============================================================================
 # 10. COLLECTION 06: UNDERGROUND MINE BAY (SHOTCRETE DRIFT, ROCK BOLTS & HPU)
@@ -1412,12 +1616,472 @@ add_area_light("Haulage_Drift_Backlight", (14.5, 0.0, 3.6), (7.5, 0.0, 1.8), ene
 add_area_light("Cutaway_Front_Fill",      (4.4, -7.8, 4.4), (4.5, 0.5, 2.6), energy=550,  size=5.0, color=(0.94, 0.96, 1.0))
 
 cam_data = bpy.data.cameras.new("Main_Camera")
-cam_data.lens = 34
+cam_data.lens = 31
 cam_obj = bpy.data.objects.new("Main_Camera", cam_data)
-cam_obj.location = Vector((4.4, -12.6, 3.6))
-cam_obj.rotation_euler = (Vector((4.2, 0.4, 2.75)) - cam_obj.location).to_track_quat('-Z', 'Y').to_euler()
+cam_obj.location = Vector((4.4, -12.6, 3.7))
+cam_obj.rotation_euler = (Vector((4.2, 0.4, 2.95)) - cam_obj.location).to_track_quat('-Z', 'Y').to_euler()
 bpy.context.scene.collection.objects.link(cam_obj)
 bpy.context.scene.camera = cam_obj
 
+# ==============================================================================
+# 12. ROCK-BREAKING ANIMATION (240 FRAMES @ 24 FPS — 2-BOULDER SHATTER CYCLE)
+# ==============================================================================
+scene.frame_start = 1
+scene.frame_end   = 240
+scene.render.fps  = 24
+
+# Exact analytic planar 3-link IK solver for the stationary rockbreaker boom
+_V1 = P_DIPPER_PIVOT - P_BOOM_BASE
+_L1 = math.hypot(_V1.x, _V1.z)
+_PHI1_0 = math.atan2(-_V1.z, _V1.x)
+
+_V2 = P_BREAKER_PIVOT - P_DIPPER_PIVOT
+_L2 = math.hypot(_V2.x, _V2.z)
+_PHI2_0 = math.atan2(-_V2.z, _V2.x)
+
+_V3_X = HX - P_BREAKER_PIVOT.x
+_V3_Z = Z_CHISEL_TIP - P_BREAKER_PIVOT.z
+
+def solve_rockbreaker_ik(tx, ty, tz, hammer_tilt_deg=0.0):
+    """
+    Compute exact (slew_z, boom_y, dipper_y, breaker_y) Euler angles in radians
+    so the moil chisel tip reaches world (tx, ty, tz) with hammer pitch hammer_tilt_deg.
+    """
+    slew_z = math.atan2(ty, tx)
+    r_horiz = math.hypot(tx, ty)
+    th = math.radians(hammer_tilt_deg)
+
+    # Breaker pivot position needed for chisel tip to hit (r_horiz, tz)
+    v3rx =  _V3_X * math.cos(th) + _V3_Z * math.sin(th)
+    v3rz = -_V3_X * math.sin(th) + _V3_Z * math.cos(th)
+    px = r_horiz - v3rx
+    pz = tz - v3rz
+
+    dx = px - P_BOOM_BASE.x
+    dz = pz - P_BOOM_BASE.z
+    dist = max(abs(_L1 - _L2) + 0.05, min(_L1 + _L2 - 0.05, math.hypot(dx, dz)))
+
+    phi_d = math.atan2(-dz, dx)
+    cos_a = max(-1.0, min(1.0, (_L1 * _L1 + dist * dist - _L2 * _L2) / (2.0 * _L1 * dist)))
+    alpha = math.acos(cos_a)
+
+    # Elbow-up configuration
+    phi1 = phi_d - alpha
+    ex = P_BOOM_BASE.x + _L1 * math.cos(phi1)
+    ez = P_BOOM_BASE.z - _L1 * math.sin(phi1)
+    phi2 = math.atan2(-(pz - ez), px - ex)
+
+    boom_y    = phi1 - _PHI1_0
+    dipper_y  = (phi2 - _PHI2_0) - boom_y
+    breaker_y = th - (boom_y + dipper_y)
+    return slew_z, boom_y, dipper_y, breaker_y
+
+def key_pose(frame, slew_z, boom_y, dipper_y, breaker_y, chisel_dz=0.0):
+    turret_pivot.rotation_euler  = (0.0, 0.0, slew_z)
+    boom_pivot.rotation_euler    = (0.0, boom_y, 0.0)
+    dipper_pivot.rotation_euler  = (0.0, dipper_y, 0.0)
+    breaker_pivot.rotation_euler = (0.0, breaker_y, 0.0)
+    obj_chisel.location          = (HX, 0.0, chisel_dz)
+
+    turret_pivot.keyframe_insert(data_path="rotation_euler", frame=frame)
+    boom_pivot.keyframe_insert(data_path="rotation_euler", frame=frame)
+    dipper_pivot.keyframe_insert(data_path="rotation_euler", frame=frame)
+    breaker_pivot.keyframe_insert(data_path="rotation_euler", frame=frame)
+    obj_chisel.keyframe_insert(data_path="location", frame=frame)
+
+# Key target coordinates
+T1_X, T1_Y, T1_Z = HX, 0.02, BOULDER1_TOP_Z
+T2_X, T2_Y, T2_Z = 6.30, -0.72, BOULDER2_TOP_Z
+
+pose_t1_hover   = solve_rockbreaker_ik(T1_X, T1_Y, T1_Z + 0.34, hammer_tilt_deg=0.0)
+pose_t1_contact = solve_rockbreaker_ik(T1_X, T1_Y, T1_Z - 0.01, hammer_tilt_deg=0.0)
+pose_t1_punch   = solve_rockbreaker_ik(T1_X, T1_Y, T1_Z - 0.24, hammer_tilt_deg=0.0)
+pose_t1_lift    = solve_rockbreaker_ik(T1_X, T1_Y, 1.20,        hammer_tilt_deg=-4.0)
+
+pose_mid_slew   = solve_rockbreaker_ik(6.85, -0.42, 1.30,       hammer_tilt_deg=-3.0)
+pose_t2_hover   = solve_rockbreaker_ik(T2_X, T2_Y, T2_Z + 0.38, hammer_tilt_deg=-3.0)
+pose_t2_contact = solve_rockbreaker_ik(T2_X, T2_Y, T2_Z - 0.01, hammer_tilt_deg=-2.0)
+pose_t2_punch   = solve_rockbreaker_ik(T2_X, T2_Y, T2_Z - 0.26, hammer_tilt_deg=-2.0)
+pose_t2_lift    = solve_rockbreaker_ik(T2_X, T2_Y, 1.25,        hammer_tilt_deg=-4.0)
+
+# --- PHASE 1: Engage & Hammer Target 1 (Frames 1–86) ---
+key_pose(1,  *pose_t1_hover,   chisel_dz=0.0)
+key_pose(14, *pose_t1_contact, chisel_dz=0.0)
+
+t1_strike_frames = list(range(16, 56, 4))
+# High-frequency hydraulic percussion burst #1 (Frames 16–54)
+for idx, f_hit in enumerate(t1_strike_frames):
+    slew_z, by, dy, ky = pose_t1_contact
+    recoil = math.radians(-0.45 if idx % 2 == 0 else -0.32)
+    key_pose(f_hit,     slew_z, by + recoil, dy - recoil * 0.6, ky - recoil * 0.4, chisel_dz=-0.055)
+    key_pose(f_hit + 2, slew_z, by,          dy,                ky,                chisel_dz=0.015)
+
+# Final heavy shattering drive through Target 1 (Frame 56–63) — chisel collider physically wedges shards apart!
+key_pose(56, *pose_t1_punch, chisel_dz=-0.095)
+key_pose(63, *pose_t1_punch, chisel_dz=0.0)
+key_pose(78, *pose_t1_lift,  chisel_dz=0.0)
+
+# --- PHASE 2: Slew, Position & Hammer Target 2 (Frames 79–192) ---
+key_pose(92,  *pose_mid_slew,   chisel_dz=0.0)
+key_pose(104, *pose_t2_hover,   chisel_dz=0.0)
+key_pose(114, *pose_t2_contact, chisel_dz=0.0)
+
+t2_strike_frames = list(range(116, 156, 4))
+# High-frequency hydraulic percussion burst #2 (Frames 116–154)
+for idx, f_hit in enumerate(t2_strike_frames):
+    slew_z, by, dy, ky = pose_t2_contact
+    recoil = math.radians(-0.48 if idx % 2 == 0 else -0.34)
+    key_pose(f_hit,     slew_z, by + recoil, dy - recoil * 0.6, ky - recoil * 0.4, chisel_dz=-0.055)
+    key_pose(f_hit + 2, slew_z, by,          dy,                ky,                chisel_dz=0.015)
+
+# Final heavy shattering drive through Target 2 (Frame 156–164)
+key_pose(156, *pose_t2_punch, chisel_dz=-0.095)
+key_pose(164, *pose_t2_punch, chisel_dz=0.0)
+key_pose(180, *pose_t2_lift,  chisel_dz=0.0)
+
+# --- PHASE 3: Return smoothly to Ready Pose for seamless loop (Frames 181–240) ---
+key_pose(208, *pose_mid_slew, chisel_dz=0.0)
+key_pose(240, *pose_t1_hover, chisel_dz=0.0)
+
+# ==============================================================================
+# 13. BLENDER BULLET RIGID BODY PHYSICS (HAMMER COLLIDER + 400x400mm GRIZZLY + SHARDS)
+# ==============================================================================
+bpy.ops.rigidbody.world_add()
+rbw = scene.rigidbody_world
+rbw.substeps_per_frame = 20
+rbw.solver_iterations  = 24
+rbw.point_cache.frame_start = scene.frame_start
+rbw.point_cache.frame_end   = scene.frame_end
+
+def add_rigid_body(
+    obj,
+    rb_type='PASSIVE',
+    shape='BOX',
+    mass=1.0,
+    friction=0.60,
+    restitution=0.25,
+    kinematic=False,
+    margin=0.002,
+    lin_damp=0.04,
+    ang_damp=0.06,
+):
+    bpy.ops.object.select_all(action='DESELECT')
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.rigidbody.object_add(type=rb_type)
+    rb = obj.rigid_body
+    rb.collision_shape = shape
+    rb.mass = mass
+    rb.friction = friction
+    rb.restitution = restitution
+    rb.kinematic = kinematic
+    rb.use_margin = True
+    rb.collision_margin = margin
+    rb.linear_damping = lin_damp
+    rb.angular_damping = ang_damp
+    rb.use_deactivation = False
+    return rb
+
+# Static PASSIVE colliders: 400x400 mm grizzly bars, frame, ore-pass shaft walls, curb, and deck slab
+for col_ob in passive_box_colliders:
+    add_rigid_body(col_ob, rb_type='PASSIVE', shape='BOX', friction=0.52, restitution=0.28, margin=0.001)
+
+add_rigid_body(obj_tip_deck, rb_type='PASSIVE', shape='MESH', friction=0.68, restitution=0.20, margin=0.002)
+
+# Animated PASSIVE Rigid Body colliders on the Hydraulic Hammer (Chisel, Tool Chuck, Lower Skirt)
+# Bullet transfers real impact momentum from the descending steel chisel directly into the rock shards!
+for hammer_ob, restit in [
+    (obj_chisel,        0.50),
+    (obj_breaker_chuck, 0.35),
+    (obj_breaker_skirt, 0.30),
+]:
+    add_rigid_body(hammer_ob, rb_type='PASSIVE', shape='CONVEX_HULL', friction=0.30, restitution=restit, kinematic=True, margin=0.002)
+
+# Remaining oversize boulders settle naturally on the 400x400mm grizzly under Bullet gravity & react to impacts
+for intact_ob, mass_kg in [(boulder3_obj, 540.0), (boulder4_obj, 420.0)]:
+    add_rigid_body(intact_ob, rb_type='ACTIVE', shape='CONVEX_HULL', mass=mass_kg, friction=0.72, restitution=0.18, kinematic=False, margin=0.002)
+
+def setup_physics_boulder_and_fx(shards, impact_xy, impact_z, f_crack_start, f_break, seed):
+    """
+    Configure ACTIVE Rigid Body Voronoi shards that stay kinematic while intact,
+    vibrate & micro-crack under percussion, then switch to full Bullet dynamics on f_break
+    as the kinematic steel chisel drives through the rock core over the 400x400 mm grizzly.
+    """
+    rng = random.Random(seed)
+    fx_root = make_empty(f"FX_Impact_{seed}", (impact_xy[0], impact_xy[1], impact_z), col_fx, parent=mine_root, size=0.08)
+
+    for s_idx, info in enumerate(shards):
+        ob = info["obj"]
+        p0 = info["rest_pos"]
+        rdir = info["radial_dir"]
+        rad = info["radius"]
+
+        # Realistic hard-rock ore mass (~2,800 kg/m^3)
+        est_mass = max(18.0, min(95.0, 2800.0 * (4.0 / 3.0) * math.pi * (rad * 0.52) ** 3))
+        rb = add_rigid_body(
+            ob, rb_type='ACTIVE', shape='CONVEX_HULL', mass=est_mass,
+            friction=0.50, restitution=0.26, kinematic=True, margin=0.002,
+            lin_damp=0.03, ang_damp=0.05,
+        )
+
+        # Hold kinematic = True through cracking phase, flip to Dynamic (False) at exact shatter impact
+        rb.kinematic = True
+        rb.keyframe_insert("kinematic", frame=1)
+        rb.keyframe_insert("kinematic", frame=f_break - 1)
+        rb.kinematic = False
+        rb.keyframe_insert("kinematic", frame=f_break)
+
+        # Intact rest pose until cracking begins
+        ob.location = p0
+        ob.rotation_euler = (0.0, 0.0, 0.0)
+        ob.keyframe_insert("location", frame=1)
+        ob.keyframe_insert("rotation_euler", frame=1)
+        ob.keyframe_insert("location", frame=f_crack_start - 2)
+        ob.keyframe_insert("rotation_euler", frame=f_crack_start - 2)
+
+        # Subtle percussion micro-cracking & vibration
+        for step, f in enumerate(range(f_crack_start, f_break - 2, 4)):
+            widen = 0.004 * (step + 1)
+            jitter_z = 0.006 if step % 2 == 0 else 0.0
+            ob.location = p0 + rdir * widen + Vector((0.0, 0.0, jitter_z))
+            ob.rotation_euler = (rng.uniform(-0.03, 0.03), rng.uniform(-0.03, 0.03), rng.uniform(-0.03, 0.03))
+            ob.keyframe_insert("location", frame=f)
+            ob.keyframe_insert("rotation_euler", frame=f)
+
+        # Brief 1-frame fracture cleavage velocity right before dynamic handoff
+        # (Bullet inherits this velocity + adds physical collision impulse from the descending chisel!)
+        pre_pos = p0 + rdir * 0.022 + Vector((0.0, 0.0, 0.015))
+        launch_pos = pre_pos + rdir * rng.uniform(0.035, 0.068) + Vector((rng.uniform(-0.01, 0.01), rng.uniform(-0.01, 0.01), rng.uniform(0.035, 0.070)))
+        ob.location = pre_pos
+        ob.rotation_euler = (0.0, 0.0, 0.0)
+        ob.keyframe_insert("location", frame=f_break - 2)
+        ob.keyframe_insert("rotation_euler", frame=f_break - 2)
+
+        ob.location = launch_pos
+        ob.rotation_euler = (rng.uniform(-0.18, 0.18), rng.uniform(-0.18, 0.18), rng.uniform(-0.18, 0.18))
+        ob.keyframe_insert("location", frame=f_break - 1)
+        ob.keyframe_insert("rotation_euler", frame=f_break - 1)
+
+    # --- FLYROCK CHIPS & IMPACT SPARKS ---
+    for c_idx in range(10):
+        chip = make_box(
+            f"Flyrock_Chip_{seed}_{c_idx+1}",
+            (impact_xy[0], impact_xy[1], impact_z),
+            (rng.uniform(0.035, 0.075), rng.uniform(0.03, 0.065), rng.uniform(0.025, 0.055)),
+            col_fx, mat=mat_ore_fresh if c_idx < 7 else mat_spark, parent=fx_root, bevel=0.004,
+        )
+        f_spawn = f_crack_start + (c_idx % 5) * 4 if c_idx < 5 else f_break
+        chip.scale = (0.001, 0.001, 0.001)
+        chip.keyframe_insert("scale", frame=1)
+        chip.keyframe_insert("scale", frame=max(1, f_spawn - 1))
+
+        ang = rng.uniform(0.0, 2.0 * math.pi)
+        spd = rng.uniform(2.2, 4.4)
+        cvx, cvy, cvz = math.cos(ang) * spd, math.sin(ang) * spd, rng.uniform(1.8, 3.8)
+        cpos = Vector((impact_xy[0], impact_xy[1], impact_z + 0.02))
+        crot = Vector((0.0, 0.0, 0.0))
+        dt = 1.0 / 24.0
+
+        for step in range(0, 18):
+            f = f_spawn + step
+            if f > 236:
+                break
+            sc = 1.0 if step < 14 else max(0.001, 1.0 - (step - 13) / 4.0)
+            chip.location = cpos
+            chip.rotation_euler = (crot.x, crot.y, crot.z)
+            chip.scale = (sc, sc, sc)
+            chip.keyframe_insert("location", frame=f)
+            chip.keyframe_insert("rotation_euler", frame=f)
+            chip.keyframe_insert("scale", frame=f)
+            cvz -= 9.81 * dt
+            cpos += Vector((cvx * dt, cvy * dt, cvz * dt))
+            crot += Vector((0.45, -0.38, 0.52))
+
+    # --- EXPANDING & FADING VOLUMETRIC-STYLE ROCK DUST PUFFS ---
+    for d_idx in range(6):
+        dust_mat, op_node = create_dust_mat(f"Rock_Dust_Mat_{seed}_{d_idx+1}")
+        bm_d = bmesh.new()
+        bmesh.ops.create_icosphere(bm_d, subdivisions=3, radius=0.26)
+        for v in bm_d.verts:
+            v.co *= rng.uniform(0.84, 1.18)
+        apply_auto_smooth_bmesh(bm_d, angle_deg=70.0)
+        mesh_d = bpy.data.meshes.new(f"Dust_Puff_{seed}_{d_idx+1}")
+        bm_d.to_mesh(mesh_d)
+        bm_d.free()
+        puff = bpy.data.objects.new(f"Dust_Puff_{seed}_{d_idx+1}", mesh_d)
+        ang = (2.0 * math.pi * d_idx) / 6.0 + rng.uniform(-0.3, 0.3)
+        start_pos = Vector((impact_xy[0] + math.cos(ang) * 0.14, impact_xy[1] + math.sin(ang) * 0.14, impact_z + 0.05))
+        end_pos   = start_pos + Vector((math.cos(ang) * 0.80, math.sin(ang) * 0.80, rng.uniform(0.60, 1.05)))
+        puff.location = start_pos
+        link_obj(puff, col_fx, mat=dust_mat, parent=fx_root)
+
+        f0 = f_break - 2 + (d_idx % 2) * 2
+        f_peak = f0 + 7
+        f_end  = min(236, f0 + 30)
+
+        puff.scale = (0.01, 0.01, 0.01)
+        puff.keyframe_insert("location", frame=1)
+        puff.keyframe_insert("scale", frame=1)
+        puff.keyframe_insert("location", frame=f0)
+        puff.keyframe_insert("scale", frame=f0)
+        op_node.outputs[0].default_value = 0.0
+        op_node.outputs[0].keyframe_insert("default_value", frame=1)
+        op_node.outputs[0].keyframe_insert("default_value", frame=f0)
+
+        puff.location = start_pos.lerp(end_pos, 0.35)
+        puff.scale = (1.55, 1.55, 1.30)
+        puff.keyframe_insert("location", frame=f_peak)
+        puff.keyframe_insert("scale", frame=f_peak)
+        op_node.outputs[0].default_value = 0.85
+        op_node.outputs[0].keyframe_insert("default_value", frame=f_peak)
+
+        puff.location = end_pos
+        puff.scale = (2.80, 2.80, 2.20)
+        puff.keyframe_insert("location", frame=f_end)
+        puff.keyframe_insert("scale", frame=f_end)
+        op_node.outputs[0].default_value = 0.0
+        op_node.outputs[0].keyframe_insert("default_value", frame=f_end)
+
+setup_physics_boulder_and_fx(boulder1_shards, (T1_X, T1_Y), T1_Z, f_crack_start=32,  f_break=56,  seed=420)
+setup_physics_boulder_and_fx(boulder2_shards, (T2_X, T2_Y), T2_Z, f_crack_start=132, f_break=156, seed=170)
+
+# Bake Bullet Rigid Body simulation cache across Frames 1–240 for smooth real-time playback
+bpy.ops.object.select_all(action='DESELECT')
+scene.frame_set(1)
 bpy.context.view_layer.update()
-print("Stationary Underground Rock Breaker, Grizzly Tip & Mine Bay generated cleanly!")
+bpy.ops.ptcache.free_bake_all()
+bpy.ops.ptcache.bake_all(bake=True)
+
+# ==============================================================================
+# 14. REAL-WORLD INDUSTRIAL SOUND FX (WAV LOADER + PROCEDURAL FALLBACK + VSE)
+# ==============================================================================
+def _write_wav(filepath, samples, sr=44100):
+    peak = max((abs(s) for s in samples), default=1.0)
+    scale = 0.92 / max(peak, 1e-6)
+    with wave.open(filepath, "w") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sr)
+        frames = bytearray()
+        for s in samples:
+            val = max(-32767, min(32767, int(s * scale * 32767.0)))
+            frames.extend(struct.pack("<h", val))
+        wf.writeframes(bytes(frames))
+
+def ensure_sound_fx(sound_dir):
+    """
+    Use real recorded WAV samples in `sounds/` when present (never overwriting them).
+    Only falls back to lightweight procedural WAV synthesis if any required file is missing.
+    """
+    os.makedirs(sound_dir, exist_ok=True)
+    sr = 44100
+    rng = random.Random(9001)
+
+    expected = {
+        "ambient":     os.path.join(sound_dir, "mine_ambient_hpu.wav"),
+        "hydraulic":   os.path.join(sound_dir, "hydraulic_boom_move.wav"),
+        "burst_1":     os.path.join(sound_dir, "hammer_burst_1.wav"),
+        "burst_2":     os.path.join(sound_dir, "hammer_burst_2.wav"),
+        "strike":      os.path.join(sound_dir, "hammer_strike.wav"),
+        "shatter_1":   os.path.join(sound_dir, "rock_shatter_1.wav"),
+        "shatter_2":   os.path.join(sound_dir, "rock_shatter_2.wav"),
+        "crumble":     os.path.join(sound_dir, "rock_shatter_crumble.wav"),
+        "clatter_1":   os.path.join(sound_dir, "grizzly_clatter_echo.wav"),
+        "clatter_2":   os.path.join(sound_dir, "grizzly_clatter_2.wav"),
+    }
+
+    # Procedural fallback only if real WAVs are absent
+    if not os.path.isfile(expected["ambient"]):
+        n_amb = int(sr * 10.2)
+        lp = 0.0
+        amb = []
+        for i in range(n_amb):
+            t = i / sr
+            lp = lp * 0.96 + rng.uniform(-1.0, 1.0) * 0.04
+            hum = 0.35 * math.sin(2.0 * math.pi * 50.0 * t) + 0.20 * math.sin(2.0 * math.pi * 100.0 * t)
+            amb.append(0.45 * hum + 0.95 * lp)
+        _write_wav(expected["ambient"], amb, sr)
+
+    if not os.path.isfile(expected["hydraulic"]):
+        n_hyd = int(sr * 1.4)
+        hyd = [math.sin(math.pi * (i / n_hyd)) * 0.4 * math.sin(2.0 * math.pi * 340.0 * (i / sr)) for i in range(n_hyd)]
+        _write_wav(expected["hydraulic"], hyd, sr)
+
+    if not os.path.isfile(expected["strike"]):
+        n_hit = int(sr * 0.20)
+        hit = [(rng.uniform(-1.0, 1.0) * math.exp(-(i / sr) * 75.0) + 0.8 * math.sin(2.0 * math.pi * 80.0 * (i / sr)) * math.exp(-(i / sr) * 20.0)) for i in range(n_hit)]
+        _write_wav(expected["strike"], hit, sr)
+
+    if not os.path.isfile(expected["crumble"]):
+        n_sh = int(sr * 1.6)
+        sh = [rng.uniform(-1.0, 1.0) * math.exp(-(i / sr) * 3.0) for i in range(n_sh)]
+        _write_wav(expected["crumble"], sh, sr)
+
+    if not os.path.isfile(expected["clatter_1"]):
+        n_cl = int(sr * 1.0)
+        cl = [math.sin(2.0 * math.pi * 680.0 * (i / sr)) * math.exp(-(i / sr) * 8.0) for i in range(n_cl)]
+        _write_wav(expected["clatter_1"], cl, sr)
+
+    return expected
+
+try:
+    _base_dir = os.path.dirname(os.path.abspath(__file__))
+except NameError:
+    _base_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else os.getcwd()
+
+sound_paths = ensure_sound_fx(os.path.join(_base_dir, "sounds"))
+
+if not scene.sequence_editor:
+    scene.sequence_editor_create()
+se = scene.sequence_editor
+strips_api = se.strips if hasattr(se, "strips") else se.sequences
+
+def add_sfx(name, filepath, channel, frame_start, volume=1.0):
+    if not os.path.isfile(filepath):
+        return None
+    st = strips_api.new_sound(name=name, filepath=filepath, channel=channel, frame_start=frame_start)
+    st.volume = volume
+    return st
+
+# Channel 1: Real underground mine pump & cavern ambient hum (Trbovlje Hrastnik Mine)
+add_sfx("Mine_Ambient_HPU", sound_paths["ambient"], channel=1, frame_start=1, volume=0.22)
+
+# Channel 2: Real underground hydraulic/pneumatic drive movement (engage, slew to Target 2, return)
+add_sfx("Hydraulic_Engage_1", sound_paths["hydraulic"], channel=2, frame_start=1,   volume=0.35)
+add_sfx("Hydraulic_Slew_2",   sound_paths["hydraulic"], channel=2, frame_start=76,  volume=0.45)
+add_sfx("Hydraulic_Return",   sound_paths["hydraulic"], channel=2, frame_start=182, volume=0.38)
+
+# Channel 3: Real underground mine pneumatic rock-hammer bursts (or fallback individual strikes)
+if os.path.isfile(sound_paths["burst_1"]) and os.path.isfile(sound_paths["burst_2"]):
+    add_sfx("Hammer_Burst_T1", sound_paths["burst_1"], channel=3, frame_start=15,  volume=1.00)
+    add_sfx("Hammer_Burst_T2", sound_paths["burst_2"], channel=3, frame_start=115, volume=1.00)
+else:
+    for idx, fr in enumerate(t1_strike_frames + [56]):
+        add_sfx(f"Hammer_Strike_T1_{idx+1}", sound_paths["strike"], channel=3, frame_start=fr, volume=0.85)
+    for idx, fr in enumerate(t2_strike_frames + [156]):
+        add_sfx(f"Hammer_Strike_T2_{idx+1}", sound_paths["strike"], channel=3, frame_start=fr, volume=0.85)
+
+# Channel 4: Real heavy rock fracture cracks & final chisel blow punch (CC0 OpenGameArt)
+add_sfx("Final_Strike_T1", sound_paths["strike"],    channel=4, frame_start=55,  volume=0.95)
+add_sfx("Rock_Break_T1",   sound_paths["shatter_1"], channel=4, frame_start=56,  volume=1.00)
+add_sfx("Final_Strike_T2", sound_paths["strike"],    channel=4, frame_start=155, volume=0.95)
+add_sfx("Rock_Break_T2",   sound_paths["shatter_2"], channel=4, frame_start=156, volume=1.00)
+
+# Channel 5: Real tumbling stones cascade (BigSoundBank #1022 CC0)
+add_sfx("Rock_Cascade_T1", sound_paths["crumble"], channel=5, frame_start=58,  volume=0.95)
+add_sfx("Rock_Cascade_T2", sound_paths["crumble"], channel=5, frame_start=158, volume=0.95)
+
+# Channel 6: Real steel grizzly bar clatter as broken ore chunks bounce/drop through 400x400 mm grid (CC0)
+add_sfx("Grizzly_Clatter_T1", sound_paths["clatter_1"], channel=6, frame_start=61,  volume=0.80)
+add_sfx("Grizzly_Clatter_T2", sound_paths["clatter_2"] if os.path.isfile(sound_paths["clatter_2"]) else sound_paths["clatter_1"], channel=6, frame_start=161, volume=0.80)
+
+# Enable synced audio playback & scrubbing in Blender
+scene.sync_mode = 'AUDIO_SYNC'
+scene.use_audio_scrub = True
+
+scene.frame_set(1)
+bpy.context.view_layer.update()
+print(
+    f"Stationary Underground Rock Breaker generated cleanly! "
+    f"(600x600mm Grizzly | Target 1: {len(boulder1_shards)} random shards, Target 2: {len(boulder2_shards)} random shards | Bullet Physics + Real WAV SFX)"
+)
